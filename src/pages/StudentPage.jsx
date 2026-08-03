@@ -5,8 +5,30 @@ import StatusBadge from '../components/StatusBadge'
 import { apiPost } from '../lib/api'
 import { BANKS, SUPPORT_WHATSAPP } from '../lib/constants'
 
+const EMPTY_FORM = {
+  bank: '',
+  otherBank: '',
+  paymentDate: '',
+  referenceNumber: '',
+  referenceUnavailable: false,
+  file: null
+}
+
+const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'application/pdf'])
+
 function normalizeIdentification(value) {
   return value.replace(/\D/g, '').slice(0, 10)
+}
+
+function todayInEcuador() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Guayaquil',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date())
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  return `${values.year}-${values.month}-${values.day}`
 }
 
 export default function StudentPage() {
@@ -16,8 +38,9 @@ export default function StudentPage() {
   const [submitting, setSubmitting] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
-  const [form, setForm] = useState({ bank: '', otherBank: '', paymentDate: '', referenceNumber: '', referenceUnavailable: false, file: null })
+  const [form, setForm] = useState(EMPTY_FORM)
 
+  const maxPaymentDate = useMemo(() => todayInEcuador(), [])
   const canSubmit = useMemo(() => {
     const bank = form.bank === 'Otro' ? form.otherBank.trim() : form.bank
     return Boolean(bank && form.paymentDate && (form.referenceUnavailable || form.referenceNumber.trim()) && form.file)
@@ -28,10 +51,13 @@ export default function StudentPage() {
     setError('')
     setMessage('')
     setLookup(null)
+    setForm(EMPTY_FORM)
+
     if (identification.length !== 10) {
       setError('Ingrese una cédula de 10 dígitos.')
       return
     }
+
     setLoading(true)
     try {
       setLookup(await apiPost('/api/student/lookup', { identification }))
@@ -46,10 +72,12 @@ export default function StudentPage() {
     event.preventDefault()
     setError('')
     setMessage('')
+
     if (!canSubmit) {
       setError('Complete todos los datos obligatorios y seleccione el comprobante.')
       return
     }
+
     const bank = form.bank === 'Otro' ? form.otherBank.trim() : form.bank
     const body = new FormData()
     body.append('identification', identification)
@@ -58,11 +86,13 @@ export default function StudentPage() {
     body.append('referenceNumber', form.referenceNumber.trim())
     body.append('referenceUnavailable', String(form.referenceUnavailable))
     body.append('file', form.file)
+
     setSubmitting(true)
     try {
       const result = await apiPost('/api/student/submit', body)
       setMessage(result.message || 'Comprobante enviado correctamente.')
       setLookup({ found: true, payment: { status: 'pending' } })
+      setForm(EMPTY_FORM)
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -75,6 +105,19 @@ export default function StudentPage() {
     setMessage('')
     setError('')
     setIdentification('')
+    setForm(EMPTY_FORM)
+  }
+
+  function selectFile(event) {
+    const file = event.target.files?.[0] || null
+    setError('')
+    if (file && !ALLOWED_TYPES.has(file.type)) {
+      event.target.value = ''
+      setForm((current) => ({ ...current, file: null }))
+      setError('El comprobante debe ser una imagen JPG, PNG o un archivo PDF.')
+      return
+    }
+    setForm((current) => ({ ...current, file }))
   }
 
   const payment = lookup?.payment
@@ -137,11 +180,11 @@ export default function StudentPage() {
               <div className="form-grid">
                 <label>Banco o cooperativa<select value={form.bank} onChange={(event) => setForm((current) => ({ ...current, bank: event.target.value }))} required><option value="">Selecciona una opción</option>{BANKS.map((bank) => <option key={bank} value={bank}>{bank}</option>)}</select></label>
                 {form.bank === 'Otro' ? <label>Nombre de la entidad<input value={form.otherBank} onChange={(event) => setForm((current) => ({ ...current, otherBank: event.target.value }))} maxLength={100} required /></label> : null}
-                <label>Fecha del pago<input type="date" value={form.paymentDate} max={new Date().toISOString().slice(0, 10)} onChange={(event) => setForm((current) => ({ ...current, paymentDate: event.target.value }))} required /></label>
+                <label>Fecha del pago<input type="date" value={form.paymentDate} max={maxPaymentDate} onChange={(event) => setForm((current) => ({ ...current, paymentDate: event.target.value }))} required /></label>
                 <label>Número de transacción o referencia<input value={form.referenceNumber} onChange={(event) => setForm((current) => ({ ...current, referenceNumber: event.target.value }))} maxLength={100} disabled={form.referenceUnavailable} required={!form.referenceUnavailable} /></label>
               </div>
               <label className="checkbox-row"><input type="checkbox" checked={form.referenceUnavailable} onChange={(event) => setForm((current) => ({ ...current, referenceUnavailable: event.target.checked, referenceNumber: event.target.checked ? '' : current.referenceNumber }))} />El comprobante no muestra un número de referencia</label>
-              <label className="file-drop"><FileUp size={28} /><strong>{form.file ? form.file.name : 'Seleccionar comprobante'}</strong><span>JPG, JPEG, PNG o PDF</span><input type="file" accept="image/jpeg,image/png,application/pdf" onChange={(event) => setForm((current) => ({ ...current, file: event.target.files?.[0] || null }))} required /></label>
+              <label className="file-drop"><FileUp size={28} /><strong>{form.file ? form.file.name : 'Seleccionar comprobante'}</strong><span>JPG, JPEG, PNG o PDF</span><input type="file" accept="image/jpeg,image/png,application/pdf" onChange={selectFile} required /></label>
               <button className="button primary full-width" disabled={!canSubmit || submitting}>{submitting ? 'Enviando comprobante...' : payment ? 'Enviar comprobante corregido' : 'Enviar comprobante'}</button>
             </form>
           </section>
