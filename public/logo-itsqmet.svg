@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 320" role="img" aria-labelledby="title desc">
+  <title id="title">ITSQMET</title>
+  <desc id="desc">Logo institucional ITSQMET</desc>
+  <g fill="none" stroke="#ffffff" stroke-width="12">
+    <path d="M30 22h245v170c0 65-48 102-122 124C78 294 30 257 30 192Z"/>
+    <path d="M78 69h150v105c0 42-28 69-75 87-47-18-75-45-75-87Z" stroke-width="7"/>
+    <path d="M110 130h86v62h-86z" stroke-width="6"/>
+    <path d="M126 130v-22h54v22M136 192v-34h34v34" stroke-width="6"/>
+  </g>
+  <circle cx="153" cy="244" r="17" fill="#d2b274"/>
+  <g stroke="#d2b274" stroke-width="4">
+    <path d="M153 215v13M153 260v13M124 244h13M169 244h13M132 223l9 9M165 256l9 9M174 223l-9 9M141 256l-9 9"/>
+  </g>
+  <text x="335" y="170" fill="#d2b274" font-family="Georgia, serif" font-size="122" letter-spacing="6">ITSQMET</text>
+  <path d="M340 195h800" stroke="#ffffff" stroke-width="5"/>
+  <text x="340" y="265" fill="#ffffff" font-family="Georgia, serif" font-size="38" letter-spacing="2">FORMANDO PROFESIONALES DE ÉLITE</text>
+  <path d="M340 284h800" stroke="#ffffff" stroke-width="5"/>
+</svg>

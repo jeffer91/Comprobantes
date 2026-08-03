@@ -1,0 +1,13 @@
+export default function Header({ title = 'Comprobantes de incorporación', subtitle }) {
+  return (
+    <header className="site-header">
+      <div className="header-inner">
+        <img src="/logo-itsqmet.svg" alt="ITSQMET" className="brand-logo" />
+        <div className="header-copy">
+          <h1>{title}</h1>
+          {subtitle ? <p>{subtitle}</p> : null}
+        </div>
+      </div>
+    </header>
+  )
+}
