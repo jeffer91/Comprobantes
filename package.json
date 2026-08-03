@@ -3,10 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "check": "npm run build",
     "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
@@ -14,7 +18,8 @@
     "lucide-react": "1.27.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "xlsx": "0.18.5"
+    "read-excel-file": "9.3.4",
+    "write-excel-file": "4.1.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "6.0.4",
