@@ -1,20 +1,45 @@
 import { createClient } from '@supabase/supabase-js'
 
-const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'application/pdf'])
+const ALLOWED_TYPES = new Map([
+  ['image/jpeg', 'jpg'],
+  ['image/png', 'png'],
+  ['application/pdf', 'pdf']
+])
 const RECEIPTS_BUCKET = 'receipts'
+const MAX_IMPORT_ROWS = 5000
+
+function responseHeaders(extra = {}) {
+  return {
+    'x-content-type-options': 'nosniff',
+    'x-frame-options': 'DENY',
+    'referrer-policy': 'no-referrer',
+    'permissions-policy': 'camera=(self), microphone=(), geolocation=()',
+    ...extra
+  }
+}
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: {
+    headers: responseHeaders({
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store'
-    }
+    })
   })
 }
 
 function fail(message, status = 400, details) {
   return json({ error: message, ...(details ? { details } : {}) }, status)
+}
+
+function withSecurityHeaders(response) {
+  const headers = new Headers(response.headers)
+  Object.entries(responseHeaders()).forEach(([name, value]) => headers.set(name, value))
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  })
 }
 
 function getSupabase(env) {
@@ -31,15 +56,28 @@ function getSupabase(env) {
   })
 }
 
-function normalizeIdentification(value) {
-  const digits = String(value ?? '').replace(/\D/g, '')
-  return digits.length <= 10 ? digits.padStart(10, '0') : digits.slice(0, 10)
+function digitsOnly(value) {
+  return String(value ?? '').replace(/\D/g, '')
+}
+
+function normalizePublicIdentification(value) {
+  const digits = digitsOnly(value)
+  return digits.length === 10 ? digits : ''
+}
+
+function normalizeImportIdentification(value) {
+  const digits = digitsOnly(value)
+  if (digits.length === 10) return digits
+  if (digits.length === 9) return `0${digits}`
+  return ''
 }
 
 function normalizePhone(value) {
-  const digits = String(value ?? '').replace(/\D/g, '')
+  const digits = digitsOnly(value)
   if (!digits) return null
-  return digits.length <= 10 ? digits.padStart(10, '0') : digits.slice(0, 15)
+  if (digits.length === 9) return `0${digits}`
+  if (digits.length >= 10 && digits.length <= 15) return digits
+  return null
 }
 
 function cleanText(value, maxLength = 250) {
@@ -47,8 +85,28 @@ function cleanText(value, maxLength = 250) {
   return text ? text.slice(0, maxLength) : null
 }
 
-function validateDate(value) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))
+function dateInEcuador() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Guayaquil',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date())
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  return `${values.year}-${values.month}-${values.day}`
+}
+
+function validatePaymentDate(value) {
+  const text = String(value || '')
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!match) return false
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const date = new Date(Date.UTC(year, month - 1, day))
+  const isRealDate = date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+  return isRealDate && text <= dateInEcuador()
 }
 
 function panelAuthorized(request, env, panel) {
@@ -63,9 +121,22 @@ function requirePanel(request, env, panel) {
 }
 
 function extensionFor(file) {
-  if (file.type === 'application/pdf') return 'pdf'
-  if (file.type === 'image/png') return 'png'
-  return 'jpg'
+  return ALLOWED_TYPES.get(file.type) || 'bin'
+}
+
+async function fileSignatureIsValid(file) {
+  const bytes = new Uint8Array(await file.slice(0, 1024).arrayBuffer())
+  if (file.type === 'image/jpeg') {
+    return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+  }
+  if (file.type === 'image/png') {
+    const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+    return signature.every((value, index) => bytes[index] === value)
+  }
+  if (file.type === 'application/pdf') {
+    return new TextDecoder().decode(bytes).includes('%PDF-')
+  }
+  return false
 }
 
 function relationObject(value) {
@@ -101,10 +172,10 @@ function normalizeImportRows(rows) {
   const seen = new Set()
 
   rows.forEach((row, index) => {
-    const identification = normalizeIdentification(row.numeroIdentificacion)
+    const identification = normalizeImportIdentification(row.numeroIdentificacion)
     const fullName = cleanText(row.Nombres, 200)
 
-    if (!/^\d{10}$/.test(identification) || !fullName) {
+    if (!identification || !fullName) {
       invalidRows.push({ row: index + 2, reason: 'Cédula o nombres incompletos.' })
       return
     }
@@ -132,10 +203,23 @@ function normalizeImportRows(rows) {
   return { normalized, invalidRows }
 }
 
+function validateImportBody(body) {
+  if (!Array.isArray(body.rows)) return 'No se recibieron filas del Excel.'
+  if (!body.rows.length) return 'El Excel no contiene estudiantes.'
+  if (body.rows.length > MAX_IMPORT_ROWS) return `El archivo supera el máximo de ${MAX_IMPORT_ROWS} estudiantes por importación.`
+  return null
+}
+
+function chunk(items, size = 400) {
+  const result = []
+  for (let index = 0; index < items.length; index += size) result.push(items.slice(index, index + size))
+  return result
+}
+
 async function buildSummary(supabase) {
   const [{ data: students, error: studentError }, { data: records, error: recordError }] = await Promise.all([
-    supabase.from('students').select('id').eq('active', true),
-    supabase.from('payment_records').select('student_id,status')
+    supabase.from('students').select('id').eq('active', true).limit(MAX_IMPORT_ROWS),
+    supabase.from('payment_records').select('student_id,status').limit(MAX_IMPORT_ROWS)
   ])
   if (studentError) throw studentError
   if (recordError) throw recordError
@@ -172,7 +256,7 @@ async function listRecords(supabase) {
       students!inner(id, identification, full_name, career_name, campus, active)
     `)
     .order('submitted_at', { ascending: false })
-    .limit(1000)
+    .limit(MAX_IMPORT_ROWS)
 
   if (error) throw error
   return (data || [])
@@ -182,8 +266,8 @@ async function listRecords(supabase) {
 
 async function studentLookup(request, env) {
   const body = await request.json().catch(() => ({}))
-  const identification = normalizeIdentification(body.identification)
-  if (!/^\d{10}$/.test(identification)) return fail('Ingrese una cédula válida de 10 dígitos.')
+  const identification = normalizePublicIdentification(body.identification)
+  if (!identification) return fail('Ingrese una cédula válida de 10 dígitos.')
 
   const supabase = getSupabase(env)
   const { data: student, error: studentError } = await supabase
@@ -224,22 +308,27 @@ async function studentLookup(request, env) {
 }
 
 async function submitReceipt(request, env) {
+  const contentType = request.headers.get('content-type') || ''
+  if (!contentType.includes('multipart/form-data')) return fail('Formato de envío inválido.', 415)
+
   const form = await request.formData()
-  const identification = normalizeIdentification(form.get('identification'))
+  const identification = normalizePublicIdentification(form.get('identification'))
   const bank = cleanText(form.get('bank'), 120)
   const paymentDate = String(form.get('paymentDate') || '')
-  const referenceUnavailable = String(form.get('referenceUnavailable')) === 'true'
+  const referenceUnavailable = String(form.get('referenceUnavailable')).toLowerCase() === 'true'
   const referenceNumber = referenceUnavailable ? null : cleanText(form.get('referenceNumber'), 120)
   const file = form.get('file')
 
-  if (!/^\d{10}$/.test(identification)) return fail('Cédula inválida.')
-  if (!bank || !validateDate(paymentDate)) return fail('Complete el banco y la fecha del pago.')
+  if (!identification) return fail('Cédula inválida.')
+  if (!bank || !validatePaymentDate(paymentDate)) return fail('Complete el banco y una fecha de pago válida.')
   if (!referenceUnavailable && !referenceNumber) return fail('Ingrese la referencia o marque que no consta.')
   if (!(file instanceof File) || !file.size) return fail('Seleccione una imagen o PDF.')
   if (!ALLOWED_TYPES.has(file.type)) return fail('El archivo debe ser JPG, JPEG, PNG o PDF.')
+  if (!(await fileSignatureIsValid(file))) return fail('El contenido del archivo no coincide con un JPG, PNG o PDF válido.')
 
-  const maxMb = Number(env.MAX_UPLOAD_MB || 20)
-  const maxBytes = Math.max(1, maxMb) * 1024 * 1024
+  const configuredLimit = Number(env.MAX_UPLOAD_MB)
+  const maxMb = Number.isFinite(configuredLimit) && configuredLimit > 0 ? configuredLimit : 20
+  const maxBytes = maxMb * 1024 * 1024
   if (file.size > maxBytes) return fail(`El comprobante supera el límite técnico de ${maxMb} MB.`)
 
   const supabase = getSupabase(env)
@@ -255,7 +344,7 @@ async function submitReceipt(request, env) {
 
   const { data: current, error: currentError } = await supabase
     .from('payment_records')
-    .select('id,status,current_version')
+    .select('id,status,current_version,bank,payment_date,reference_number,reference_unavailable,current_file_path,correction_reason,submitted_at,approved_at')
     .eq('student_id', student.id)
     .maybeSingle()
 
@@ -277,9 +366,7 @@ async function submitReceipt(request, env) {
     })
   if (uploadError) throw uploadError
 
-  const recordPayload = {
-    id: recordId,
-    student_id: student.id,
+  const mutablePayload = {
     status: 'pending',
     bank,
     payment_date: paymentDate,
@@ -292,14 +379,32 @@ async function submitReceipt(request, env) {
     approved_at: null
   }
 
-  const recordQuery = current
-    ? supabase.from('payment_records').update(recordPayload).eq('id', recordId)
-    : supabase.from('payment_records').insert(recordPayload)
-  const { error: recordError } = await recordQuery
+  let recordError
+  let savedRecord
+  if (current) {
+    const result = await supabase
+      .from('payment_records')
+      .update(mutablePayload)
+      .eq('id', recordId)
+      .eq('status', 'correction_requested')
+      .select('id')
+      .maybeSingle()
+    recordError = result.error
+    savedRecord = result.data
+  } else {
+    const result = await supabase
+      .from('payment_records')
+      .insert({ id: recordId, student_id: student.id, ...mutablePayload })
+      .select('id')
+      .maybeSingle()
+    recordError = result.error
+    savedRecord = result.data
+  }
 
-  if (recordError) {
+  if (recordError || !savedRecord) {
     await supabase.storage.from(RECEIPTS_BUCKET).remove([filePath])
-    throw recordError
+    if (recordError) throw recordError
+    return fail('El comprobante cambió de estado. Actualice la página e inténtelo nuevamente.', 409)
   }
 
   const { error: versionError } = await supabase.from('receipt_versions').insert({
@@ -310,14 +415,37 @@ async function submitReceipt(request, env) {
     mime_type: file.type,
     file_size: file.size
   })
-  if (versionError) throw versionError
 
-  await supabase.from('audit_logs').insert({
+  if (versionError) {
+    if (current) {
+      const { error: restoreError } = await supabase.from('payment_records').update({
+        status: current.status,
+        bank: current.bank,
+        payment_date: current.payment_date,
+        reference_number: current.reference_number,
+        reference_unavailable: current.reference_unavailable,
+        current_file_path: current.current_file_path,
+        current_version: current.current_version,
+        correction_reason: current.correction_reason,
+        submitted_at: current.submitted_at,
+        approved_at: current.approved_at
+      }).eq('id', recordId)
+      if (restoreError) console.error('No se pudo restaurar el comprobante anterior.', restoreError)
+    } else {
+      const { error: deleteError } = await supabase.from('payment_records').delete().eq('id', recordId)
+      if (deleteError) console.error('No se pudo eliminar el registro incompleto.', deleteError)
+    }
+    await supabase.storage.from(RECEIPTS_BUCKET).remove([filePath])
+    throw versionError
+  }
+
+  const { error: auditError } = await supabase.from('audit_logs').insert({
     action: current ? 'receipt_corrected' : 'receipt_submitted',
     entity_type: 'payment_record',
     entity_id: recordId,
     metadata: { version, identification }
   })
+  if (auditError) console.error('No se pudo guardar la auditoría del envío.', auditError)
 
   return json({ message: 'Comprobante enviado correctamente.', recordId }, 201)
 }
@@ -337,58 +465,73 @@ async function panelRecords(request, env, panel) {
 async function approveRecord(request, env, id) {
   const unauthorized = requirePanel(request, env, 'collections')
   if (unauthorized) return unauthorized
+
   const supabase = getSupabase(env)
   const now = new Date().toISOString()
   const { data, error } = await supabase
     .from('payment_records')
     .update({ status: 'approved', approved_at: now, correction_reason: null })
     .eq('id', id)
+    .eq('status', 'pending')
     .select('id')
     .maybeSingle()
+
   if (error) throw error
-  if (!data) return fail('Comprobante no encontrado.', 404)
-  await supabase.from('audit_logs').insert({ action: 'receipt_approved', entity_type: 'payment_record', entity_id: id })
+  if (!data) return fail('Solo se puede aprobar un comprobante pendiente.', 409)
+
+  const { error: auditError } = await supabase.from('audit_logs').insert({ action: 'receipt_approved', entity_type: 'payment_record', entity_id: id })
+  if (auditError) console.error('No se pudo guardar la auditoría de aprobación.', auditError)
   return json({ success: true })
 }
 
 async function requestCorrection(request, env, id) {
   const unauthorized = requirePanel(request, env, 'collections')
   if (unauthorized) return unauthorized
+
   const body = await request.json().catch(() => ({}))
   const reason = cleanText(body.reason, 500)
   if (!reason) return fail('Escriba el motivo de la corrección.')
+
   const supabase = getSupabase(env)
   const { data, error } = await supabase
     .from('payment_records')
     .update({ status: 'correction_requested', correction_reason: reason, approved_at: null })
     .eq('id', id)
+    .eq('status', 'pending')
     .select('id')
     .maybeSingle()
+
   if (error) throw error
-  if (!data) return fail('Comprobante no encontrado.', 404)
-  await supabase.from('audit_logs').insert({
+  if (!data) return fail('Solo se puede solicitar corrección de un comprobante pendiente.', 409)
+
+  const { error: auditError } = await supabase.from('audit_logs').insert({
     action: 'receipt_correction_requested',
     entity_type: 'payment_record',
     entity_id: id,
     metadata: { reason }
   })
+  if (auditError) console.error('No se pudo guardar la auditoría de corrección.', auditError)
   return json({ success: true })
 }
 
 async function signedUrl(request, env, panel, id) {
   const unauthorized = requirePanel(request, env, panel)
   if (unauthorized) return unauthorized
+
   const supabase = getSupabase(env)
   const { data: record, error } = await supabase
     .from('payment_records')
     .select('current_file_path')
     .eq('id', id)
     .maybeSingle()
+
   if (error) throw error
-  if (!record) return fail('Comprobante no encontrado.', 404)
+  if (!record?.current_file_path) return fail('Comprobante no encontrado.', 404)
+
   const { data, error: signError } = await supabase.storage
     .from(RECEIPTS_BUCKET)
     .createSignedUrl(record.current_file_path, 300)
+
   if (signError) throw signError
   return json({ url: data.signedUrl })
 }
@@ -396,12 +539,16 @@ async function signedUrl(request, env, panel, id) {
 async function importPreview(request, env) {
   const unauthorized = requirePanel(request, env, 'admin')
   if (unauthorized) return unauthorized
+
   const body = await request.json().catch(() => ({}))
-  if (!Array.isArray(body.rows)) return fail('No se recibieron filas del Excel.')
+  const bodyError = validateImportBody(body)
+  if (bodyError) return fail(bodyError)
+
   const { normalized, invalidRows } = normalizeImportRows(body.rows)
   const supabase = getSupabase(env)
-  const { data: current, error } = await supabase.from('students').select('identification').limit(5000)
+  const { data: current, error } = await supabase.from('students').select('identification').limit(MAX_IMPORT_ROWS)
   if (error) throw error
+
   const currentSet = new Set((current || []).map((row) => row.identification))
   const incomingSet = new Set(normalized.map((row) => row.identification))
   return json({
@@ -416,8 +563,11 @@ async function importPreview(request, env) {
 async function importCommit(request, env) {
   const unauthorized = requirePanel(request, env, 'admin')
   if (unauthorized) return unauthorized
+
   const body = await request.json().catch(() => ({}))
-  if (!Array.isArray(body.rows)) return fail('No se recibieron filas del Excel.')
+  const bodyError = validateImportBody(body)
+  if (bodyError) return fail(bodyError)
+
   const { normalized, invalidRows } = normalizeImportRows(body.rows)
   if (invalidRows.length) return fail('El Excel contiene filas inválidas.', 400, invalidRows)
   if (!normalized.length) return fail('El Excel no contiene estudiantes válidos.')
@@ -426,7 +576,7 @@ async function importCommit(request, env) {
   const { data: current, error: currentError } = await supabase
     .from('students')
     .select('id, identification')
-    .limit(5000)
+    .limit(MAX_IMPORT_ROWS)
   if (currentError) throw currentError
 
   const currentSet = new Set((current || []).map((row) => row.identification))
@@ -451,23 +601,29 @@ async function importCommit(request, env) {
   const { error: upsertError } = await supabase
     .from('students')
     .upsert(payload, { onConflict: 'identification' })
-  if (upsertError) throw upsertError
 
-  if (body.deactivateMissing && missing.length) {
-    const ids = missing.map((row) => row.id)
-    const { error: deactivateError } = await supabase
-      .from('students')
-      .update({ active: false })
-      .in('id', ids)
-    if (deactivateError) throw deactivateError
+  if (upsertError) {
+    await supabase.from('student_imports').delete().eq('id', importId)
+    throw upsertError
   }
 
-  await supabase.from('audit_logs').insert({
+  if (body.deactivateMissing && missing.length) {
+    for (const ids of chunk(missing.map((row) => row.id))) {
+      const { error: deactivateError } = await supabase
+        .from('students')
+        .update({ active: false })
+        .in('id', ids)
+      if (deactivateError) throw deactivateError
+    }
+  }
+
+  const { error: auditError } = await supabase.from('audit_logs').insert({
     action: 'students_imported',
     entity_type: 'student_import',
     entity_id: importId,
     metadata: { total: normalized.length, newCount, updatedCount, missingCount: missing.length }
   })
+  if (auditError) console.error('No se pudo guardar la auditoría de importación.', auditError)
 
   return json({ success: true, importId, total: normalized.length })
 }
@@ -475,6 +631,7 @@ async function importCommit(request, env) {
 async function exportRows(request, env) {
   const unauthorized = requirePanel(request, env, 'admin')
   if (unauthorized) return unauthorized
+
   const supabase = getSupabase(env)
   const { data, error } = await supabase
     .from('students')
@@ -492,7 +649,7 @@ async function exportRows(request, env) {
       payment_records(status, bank, payment_date, reference_number, submitted_at, approved_at, correction_reason, id)
     `)
     .order('full_name', { ascending: true })
-    .limit(5000)
+    .limit(MAX_IMPORT_ROWS)
   if (error) throw error
 
   const rows = (data || []).map((student) => {
@@ -526,7 +683,7 @@ async function handleApi(request, env) {
   const path = url.pathname
   const method = request.method.toUpperCase()
 
-  if (method === 'GET' && path === '/api/health') return json({ ok: true })
+  if (method === 'GET' && path === '/api/health') return json({ ok: true, configured: Boolean(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY) })
   if (method === 'POST' && path === '/api/student/lookup') return studentLookup(request, env)
   if (method === 'POST' && path === '/api/student/submit') return submitReceipt(request, env)
 
@@ -553,7 +710,7 @@ export default {
     try {
       const url = new URL(request.url)
       if (url.pathname.startsWith('/api/')) return await handleApi(request, env)
-      return env.ASSETS.fetch(request)
+      return withSecurityHeaders(await env.ASSETS.fetch(request))
     } catch (error) {
       console.error(error)
       return fail('Ocurrió un error interno. Inténtelo nuevamente.', 500)
