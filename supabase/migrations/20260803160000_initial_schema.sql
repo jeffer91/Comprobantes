@@ -6,7 +6,7 @@ create extension if not exists pgcrypto;
 
 create table if not exists public.student_imports (
   id uuid primary key default gen_random_uuid(),
-  file_name text not null,
+  file_name text not null check (btrim(file_name) <> ''),
   total_rows integer not null default 0 check (total_rows >= 0),
   new_count integer not null default 0 check (new_count >= 0),
   updated_count integer not null default 0 check (updated_count >= 0),
@@ -17,14 +17,14 @@ create table if not exists public.student_imports (
 
 create table if not exists public.students (
   id uuid primary key default gen_random_uuid(),
-  identification text not null unique check (identification ~ '^\d{10}$'),
-  full_name text not null,
+  identification text not null unique check (identification ~ '^[0-9]{10}$'),
+  full_name text not null check (btrim(full_name) <> ''),
   career_code text,
   career_name text,
   schedule text,
   personal_email text,
   institutional_email text,
-  phone text,
+  phone text check (phone is null or phone ~ '^[0-9]{10,15}$'),
   campus text,
   active boolean not null default true,
   source_import_id uuid references public.student_imports(id) on delete set null,
@@ -37,25 +37,38 @@ create table if not exists public.payment_records (
   student_id uuid not null unique references public.students(id) on delete restrict,
   status text not null default 'pending'
     check (status in ('pending', 'correction_requested', 'approved')),
-  bank text not null,
+  bank text not null check (btrim(bank) <> ''),
   payment_date date not null,
   reference_number text,
   reference_unavailable boolean not null default false,
-  current_file_path text not null,
+  current_file_path text not null check (btrim(current_file_path) <> ''),
   current_version integer not null default 1 check (current_version > 0),
   correction_reason text,
   submitted_at timestamptz not null default now(),
   approved_at timestamptz,
   updated_at timestamptz not null default now(),
-  check (reference_unavailable or reference_number is not null),
-  check (status <> 'correction_requested' or correction_reason is not null)
+  check (
+    (reference_unavailable and reference_number is null)
+    or
+    (not reference_unavailable and nullif(btrim(reference_number), '') is not null)
+  ),
+  check (
+    (status = 'correction_requested' and nullif(btrim(correction_reason), '') is not null)
+    or
+    (status <> 'correction_requested' and correction_reason is null)
+  ),
+  check (
+    (status = 'approved' and approved_at is not null)
+    or
+    (status <> 'approved' and approved_at is null)
+  )
 );
 
 create table if not exists public.receipt_versions (
   id uuid primary key default gen_random_uuid(),
   payment_record_id uuid not null references public.payment_records(id) on delete cascade,
   version integer not null check (version > 0),
-  file_path text not null unique,
+  file_path text not null unique check (btrim(file_path) <> ''),
   file_name text,
   mime_type text not null check (mime_type in ('image/jpeg', 'image/png', 'application/pdf')),
   file_size bigint not null check (file_size > 0),
@@ -65,15 +78,15 @@ create table if not exists public.receipt_versions (
 
 create table if not exists public.audit_logs (
   id bigint generated always as identity primary key,
-  action text not null,
-  entity_type text not null,
+  action text not null check (btrim(action) <> ''),
+  entity_type text not null check (btrim(entity_type) <> ''),
   entity_id uuid,
   metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
 
 create table if not exists public.app_settings (
-  key text primary key,
+  key text primary key check (btrim(key) <> ''),
   value jsonb not null,
   updated_at timestamptz not null default now()
 );
@@ -87,6 +100,7 @@ on conflict (key) do update set value = excluded.value, updated_at = now();
 create or replace function public.set_updated_at()
 returns trigger
 language plpgsql
+security invoker
 set search_path = public
 as $$
 begin
@@ -135,6 +149,7 @@ revoke all on public.receipt_versions from anon, authenticated;
 revoke all on public.audit_logs from anon, authenticated;
 revoke all on public.app_settings from anon, authenticated;
 
+grant usage on schema public to service_role;
 grant all on public.student_imports to service_role;
 grant all on public.students to service_role;
 grant all on public.payment_records to service_role;
