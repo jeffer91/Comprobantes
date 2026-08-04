@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "itsqmet-comprobantes",
-  "main": "worker/index.js",
+  "main": "worker/extended.js",
   "compatibility_date": "2026-07-29",
   "assets": {
     "directory": "./dist",
