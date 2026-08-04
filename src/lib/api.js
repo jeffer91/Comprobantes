@@ -1,22 +1,15 @@
-function panelStorageKey(panel) {
-  return `itsqmet_${panel}_access`
+function panelAccessValue(panel) {
+  if (panel === 'admin') return 'administracion'
+  if (panel === 'collections') return 'recaudaciones'
+  return ''
 }
 
 export function capturePanelAccess(panel) {
-  const params = new URLSearchParams(window.location.search)
-  const access = params.get('access')
-  if (access) {
-    sessionStorage.setItem(panelStorageKey(panel), access)
-    params.delete('access')
-    const nextQuery = params.toString()
-    const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}`
-    window.history.replaceState({}, '', nextUrl)
-  }
-  return sessionStorage.getItem(panelStorageKey(panel)) || ''
+  return panelAccessValue(panel)
 }
 
 export function getPanelAccess(panel) {
-  return sessionStorage.getItem(panelStorageKey(panel)) || ''
+  return panelAccessValue(panel)
 }
 
 async function request(path, options = {}) {
