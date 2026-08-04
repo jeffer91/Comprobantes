@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Download, Eye, FileSpreadsheet, RefreshCw, Upload } from 'lucide-react'
+import { Download, Eye, FileSpreadsheet, RefreshCw, Trash2, Upload } from 'lucide-react'
 import { readSheet } from 'read-excel-file/browser'
 import writeExcelFile from 'write-excel-file/browser'
 import Header from '../components/Header'
 import PanelAccessError from '../components/PanelAccessError'
 import StatusBadge from '../components/StatusBadge'
 import { apiGet, apiPost, capturePanelAccess } from '../lib/api'
+import './AdminPage.css'
 
 const MAX_EXCEL_BYTES = 10 * 1024 * 1024
 const CANONICAL_HEADERS = [
@@ -97,12 +98,15 @@ export default function AdminPage() {
   const [records, setRecords] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const [preview, setPreview] = useState(null)
   const [rows, setRows] = useState([])
   const [filename, setFilename] = useState('')
   const [importing, setImporting] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [deactivateMissing, setDeactivateMissing] = useState(false)
+  const [resetTarget, setResetTarget] = useState(null)
+  const [resettingId, setResettingId] = useState('')
 
   useEffect(() => {
     capturePanelAccess('admin')
@@ -134,6 +138,7 @@ export default function AdminPage() {
     if (!file) return
 
     setError('')
+    setNotice('')
     clearImportState(setPreview, setRows, setFilename, setDeactivateMissing)
 
     try {
@@ -159,9 +164,11 @@ export default function AdminPage() {
     if (!preview || preview.invalidRows?.length) return
     setImporting(true)
     setError('')
+    setNotice('')
     try {
       await apiPost('/api/admin/import/commit', { rows, filename, deactivateMissing }, 'admin')
       clearImportState(setPreview, setRows, setFilename, setDeactivateMissing)
+      setNotice('La lista de estudiantes se actualizó correctamente.')
       await loadData()
     } catch (requestError) {
       setError(requestError.message)
@@ -210,9 +217,39 @@ export default function AdminPage() {
     }
   }
 
+  async function resetReceipt(event) {
+    event.preventDefault()
+    if (!resetTarget) return
+
+    const identification = resetTarget.identification.trim()
+    if (identification !== resetTarget.record.student.identification) return
+
+    setResettingId(resetTarget.record.id)
+    setError('')
+    setNotice('')
+    try {
+      const result = await apiPost(
+        `/api/admin/records/${resetTarget.record.id}/reset`,
+        { identification },
+        'admin'
+      )
+      setResetTarget(null)
+      setNotice(result.message)
+      await loadData()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setResettingId('')
+    }
+  }
+
   const submittedPercentage = useMemo(
     () => summary?.students ? Math.round((summary.submitted / summary.students) * 100) : 0,
     [summary]
+  )
+
+  const resetConfirmed = Boolean(
+    resetTarget && resetTarget.identification.trim() === resetTarget.record.student.identification
   )
 
   if (authorized === false) return <PanelAccessError panelName="Panel de administración" />
@@ -230,14 +267,32 @@ export default function AdminPage() {
         </div>
 
         {error ? <div className="alert alert-error">{error}</div> : null}
+        {notice ? <div className="alert alert-success">{notice}</div> : null}
 
         <section className="metrics-grid admin-metrics">
-          <article className="metric-card"><span>Estudiantes activos</span><strong>{summary?.students ?? '—'}</strong></article>
-          <article className="metric-card"><span>Sin enviar</span><strong>{summary?.notSubmitted ?? '—'}</strong></article>
+          <article className="metric-card"><span>Total habilitados</span><strong>{summary?.students ?? '—'}</strong></article>
+          <article className="metric-card metric-received"><span>Han enviado</span><strong>{summary?.submitted ?? '—'}</strong></article>
+          <article className="metric-card metric-missing"><span>Faltan por enviar</span><strong>{summary?.notSubmitted ?? '—'}</strong></article>
           <article className="metric-card"><span>Pendientes</span><strong>{summary?.pending ?? '—'}</strong></article>
           <article className="metric-card"><span>Correcciones</span><strong>{summary?.correctionRequested ?? '—'}</strong></article>
           <article className="metric-card"><span>Aprobados</span><strong>{summary?.approved ?? '—'}</strong></article>
-          <article className="metric-card"><span>Avance</span><strong>{submittedPercentage}%</strong></article>
+        </section>
+
+        <section className="card progress-card" aria-label="Avance de recepción de comprobantes">
+          <div className="progress-heading">
+            <div>
+              <span className="eyebrow">Avance de recepción</span>
+              <h3>Comprobantes recibidos</h3>
+            </div>
+            <strong>{submittedPercentage}%</strong>
+          </div>
+          <div className="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={submittedPercentage}>
+            <span style={{ width: `${submittedPercentage}%` }} />
+          </div>
+          <div className="progress-copy">
+            <span><strong>{summary?.submitted ?? 0}</strong> de <strong>{summary?.students ?? 0}</strong> estudiantes ya enviaron.</span>
+            <span>Faltan <strong>{summary?.notSubmitted ?? 0}</strong> estudiantes.</span>
+          </div>
         </section>
 
         <section className="card import-card">
@@ -273,19 +328,31 @@ export default function AdminPage() {
         ) : null}
 
         <section className="card">
-          <div className="panel-heading compact"><div><span className="eyebrow">Últimos registros</span><h3>Comprobantes enviados</h3></div></div>
+          <div className="panel-heading compact"><div><span className="eyebrow">Registros</span><h3>Comprobantes enviados</h3></div></div>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Estudiante</th><th>Carrera</th><th>Banco</th><th>Fecha</th><th>Estado</th><th>Archivo</th></tr></thead>
+              <thead><tr><th>Estudiante</th><th>Carrera</th><th>Banco</th><th>Fecha</th><th>Estado</th><th>Acciones</th></tr></thead>
               <tbody>
-                {records.slice(0, 25).map((record) => (
+                {records.map((record) => (
                   <tr key={record.id}>
                     <td><strong>{record.student.fullName}</strong><small>{record.student.identification}</small></td>
                     <td>{record.student.careerName || '—'}</td>
                     <td>{record.bank}</td>
                     <td>{record.submittedAt ? new Date(record.submittedAt).toLocaleString('es-EC') : '—'}</td>
                     <td><StatusBadge status={record.status} /></td>
-                    <td><button className="icon-button" title="Ver comprobante" onClick={() => openReceipt(record.id)}><Eye size={18} /></button></td>
+                    <td>
+                      <div className="action-row">
+                        <button className="icon-button" title="Ver comprobante" onClick={() => openReceipt(record.id)} disabled={resettingId === record.id}><Eye size={18} /></button>
+                        <button
+                          className="icon-button danger"
+                          title="Restablecer comprobante"
+                          onClick={() => setResetTarget({ record, identification: '' })}
+                          disabled={resettingId === record.id}
+                        >
+                          <Trash2 size={18} />
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
                 {!records.length && !loading ? <tr><td colSpan="6" className="empty-cell">Todavía no hay comprobantes enviados.</td></tr> : null}
@@ -294,6 +361,44 @@ export default function AdminPage() {
           </div>
         </section>
       </main>
+
+      {resetTarget ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => !resettingId && setResetTarget(null)}>
+          <form className="modal-card" role="dialog" aria-modal="true" aria-labelledby="reset-title" onSubmit={resetReceipt} onMouseDown={(event) => event.stopPropagation()}>
+            <h3 id="reset-title">Restablecer comprobante</h3>
+            <p>
+              Se eliminará el envío de <strong>{resetTarget.record.student.fullName}</strong> y el estudiante volverá al estado <strong>Sin enviar</strong>.
+            </p>
+            {resetTarget.record.status === 'approved' ? (
+              <div className="alert alert-warning">Este comprobante ya está aprobado. Confirma cuidadosamente antes de eliminarlo.</div>
+            ) : null}
+            <div className="reset-details">
+              <span>Estado actual</span><StatusBadge status={resetTarget.record.status} />
+            </div>
+            <label className="confirmation-field">
+              Escribe la cédula <strong>{resetTarget.record.student.identification}</strong> para confirmar
+              <input
+                autoFocus
+                inputMode="numeric"
+                maxLength="10"
+                value={resetTarget.identification}
+                onChange={(event) => setResetTarget((current) => ({
+                  ...current,
+                  identification: event.target.value.replace(/\D/g, '').slice(0, 10)
+                }))}
+                disabled={Boolean(resettingId)}
+                required
+              />
+            </label>
+            <div className="modal-actions">
+              <button type="button" className="button secondary" onClick={() => setResetTarget(null)} disabled={Boolean(resettingId)}>Cancelar</button>
+              <button className="button danger-button" disabled={!resetConfirmed || Boolean(resettingId)}>
+                <Trash2 size={18} /> {resettingId ? 'Eliminando...' : 'Eliminar envío'}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </>
   )
 }
